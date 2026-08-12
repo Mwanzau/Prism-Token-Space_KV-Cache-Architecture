@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtualenv
+.venv/
+
+# Models and large sample data
+models/
+File_Samples_For_Tests/
+
+# Output and logs
+output/
+*.log
+
+# VS Code
+.vscode/
+
+# pytest cache
+.pytest_cache/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

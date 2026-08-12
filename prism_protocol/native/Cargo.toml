@@ -1,0 +1,20 @@
+[package]
+name = "prism_token_space_native"
+version = "0.1.0"
+edition = "2021"
+authors = ["Prism Protocol Team <team@prism.ai>"]
+description = "Native Prism Token-Space runtime for async disk streaming and llama.cpp token injection."
+license = "MIT"
+
+[lib]
+name = "prism_token_space_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+memmap2 = "0.5"
+byteorder = "1.4"
+zerocopy = "0.6"
+tokio = { version = "1.40", features = ["fs", "io-util", "macros", "rt-multi-thread"] }
+
+[features]
+default = []
