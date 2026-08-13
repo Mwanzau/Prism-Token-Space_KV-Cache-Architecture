@@ -7,6 +7,7 @@ import tempfile
 from .binary_format import PrismWriter
 from .indexer import PrismIndexer
 from .tokenizer_bridge import TokenizerBridge
+from .tokenizer_adapter import get_tokenizer_adapter
 
 
 def _load_pdf_text(path: str) -> str:
@@ -64,7 +65,7 @@ def build_prism_from_document(
     if not text.strip():
         raise ValueError("Document contains no extractable text")
 
-    tokenizer = TokenizerBridge.from_gguf(gguf_path)
+    tokenizer = get_tokenizer_adapter(gguf_path)
     tokens = tokenizer.encode(text, progress_callback=progress_callback)
     if not tokens:
         raise ValueError("No tokens were produced from document text")

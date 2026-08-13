@@ -61,6 +61,18 @@ def print_error(message: str) -> None:
     print(Color.red(f"ERROR: {message}"))
 
 
+def _is_local_model_path(p: Path) -> bool:
+    """Return True only when gguf_path refers to a local file that must exist."""
+    s = str(p)
+    if s.startswith("hf:"):
+        return False
+    if p.suffix == ".json":  # tokenizer.json file
+        return True
+    if p.is_dir():
+        return True
+    return p.suffix == ".gguf"
+
+
 def decode_snippet(tokens: list[int], tokenizer, max_chars: int = 240) -> str:
     decoded = tokenizer.decode(tokens)
     text = " ".join(decoded.split())
@@ -77,9 +89,23 @@ def _split_into_sentences(text: str) -> list[str]:
     return [p.strip() for p in pieces if p.strip()]
 
 
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "if", "because", "as", "what",
+    "which", "who", "whom", "this", "that", "these", "those", "is", "are",
+    "was", "were", "be", "been", "being", "have", "has", "had", "do",
+    "does", "did", "to", "from", "in", "out", "on", "off", "over", "under",
+    "again", "further", "then", "once", "here", "there", "when", "where",
+    "why", "how", "all", "any", "both", "each", "few", "more", "most",
+    "other", "some", "such", "no", "nor", "not", "only", "own", "same",
+    "so", "than", "too", "very", "can", "will", "just", "don", "should", "now", "of", "it"
+}
+
+
 def _score_sentence(sentence: str, query: str) -> float:
-    # Lightweight relevance: overlap of word tokens normalized by length
-    q_words = {w.lower() for w in re.findall(r"\w+", query)}
+    # Lightweight relevance: overlap of content word tokens normalized by length
+    q_words = {w.lower() for w in re.findall(r"\w+", query) if w.lower() not in STOPWORDS}
+    if not q_words:
+        q_words = {w.lower() for w in re.findall(r"\w+", query)}
     s_words = [w.lower() for w in re.findall(r"\w+", sentence)]
     if not s_words or not q_words:
         return 0.0
@@ -87,10 +113,23 @@ def _score_sentence(sentence: str, query: str) -> float:
     return overlap / (len(s_words) ** 0.5)
 
 
+def extract_highest_scoring_sentence_window(text: str, query: str) -> tuple[int, str, float]:
+    sentences = _split_into_sentences(text)
+    if not sentences:
+        return 0, "", 0.0
+    scores = [_score_sentence(s, query) for s in sentences]
+    best_idx = max(range(len(sentences)), key=lambda i: scores[i])
+    start_idx = max(0, best_idx - 1)
+    end_idx = min(len(sentences), best_idx + 2)
+    window_sentences = sentences[start_idx:end_idx]
+    window_text = " ".join(window_sentences)
+    return best_idx, window_text, scores[best_idx]
+
+
 def build_prism_artifact(document_path: Path, gguf_path: Path, output_path: Path, chunk_size: int, append: bool = True) -> Path:
     if not document_path.exists():
         raise FileNotFoundError(f"Document not found: {document_path}")
-    if not gguf_path.exists():
+    if _is_local_model_path(gguf_path) and not gguf_path.exists():
         raise FileNotFoundError(f"GGUF model not found: {gguf_path}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,7 +153,7 @@ def build_prism_artifact(document_path: Path, gguf_path: Path, output_path: Path
 def query_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: int, preview_tokens: int, log_path: Optional[Path]) -> int:
     if not prism_path.exists():
         raise FileNotFoundError(f"Prism artifact not found: {prism_path}")
-    if not gguf_path.exists():
+    if _is_local_model_path(gguf_path) and not gguf_path.exists():
         raise FileNotFoundError(f"GGUF model not found: {gguf_path}")
 
     tokenizer = get_tokenizer_adapter(str(gguf_path))
@@ -168,7 +207,7 @@ def query_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: i
 def qa_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: int, preview_tokens: int, answer_length: int, log_path: Optional[Path]) -> int:
     if not prism_path.exists():
         raise FileNotFoundError(f"Prism artifact not found: {prism_path}")
-    if not gguf_path.exists():
+    if _is_local_model_path(gguf_path) and not gguf_path.exists():
         raise FileNotFoundError(f"GGUF model not found: {gguf_path}")
 
     tokenizer = get_tokenizer_adapter(str(gguf_path))
@@ -190,31 +229,27 @@ def qa_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: int,
         print_error("No matching chunks found in the Prism index.")
         return 0
 
-    # Build a concise candidate answer using the highest-scoring chunk previews.
-    # Sentence-level extraction and scoring across top chunks for a concise synthesized answer
-    sentence_candidates: list[tuple[float, int, int, str]] = []  # (score, chunk_id, sent_idx, sentence)
+    # Extract sentence-level window (matching sentence + 1 before + 1 after) for each candidate chunk
+    sentence_candidates: list[tuple[float, int, int, str]] = []  # (combined_score, chunk_id, sent_idx, window_text)
     for retrieved in ranked:
         text = tokenizer.decode(retrieved.tokens)
-        sentences = _split_into_sentences(text)
-        for idx, sent in enumerate(sentences):
-            rel = _score_sentence(sent, query)
-            # combine chunk score with sentence relevance
-            combined = retrieved.score * (1.0 + rel)
-            sentence_candidates.append((combined, retrieved.chunk_id, idx, sent))
+        best_idx, window_text, sent_rel = extract_highest_scoring_sentence_window(text, query)
+        if window_text:
+            combined = retrieved.score * (1.0 + sent_rel)
+            sentence_candidates.append((combined, retrieved.chunk_id, best_idx, window_text))
 
     sentence_candidates.sort(key=lambda t: t[0], reverse=True)
 
     answer_pieces: list[str] = []
-    provenance: list[tuple[int, int, float, str]] = []  # chunk_id, sent_idx, score, sentence
+    provenance: list[tuple[int, int, float, str]] = []  # chunk_id, sent_idx, score, window_text
     used_chunks = set()
     cur_len = 0
-    for score, chunk_id, sidx, sent in sentence_candidates:
+    for score, chunk_id, sidx, window_text in sentence_candidates:
         if cur_len >= answer_length:
             break
-        # avoid adding many sentences from same chunk in a row
-        if len(answer_pieces) >= 4 and chunk_id in used_chunks:
+        if chunk_id in used_chunks:
             continue
-        piece = sent.strip()
+        piece = window_text.strip()
         if not piece:
             continue
         piece_len = len(piece)

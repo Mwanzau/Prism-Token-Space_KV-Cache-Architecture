@@ -6,9 +6,9 @@ import zlib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
-from prism_protocol.src.token_space.indexer import IndexMerger
+from prism_protocol.src.token_space.indexer import PrismIndexer, IndexMerger
 
 BLOCK_SIZE = 4096
 MAGIC = b"PRISM_AI"
@@ -301,29 +301,43 @@ class PrismReader:
     def chunk_info(self, chunk_id: int) -> Optional[PrismChunkMetadata]:
         return self.chunk_metadata.get(chunk_id)
 
-    def score_chunks(self, query_tokens: List[int]) -> Dict[int, float]:
+    def score_chunks(self, query_tokens: List[int], k1: float = 1.5, b: float = 0.75) -> Dict[int, float]:
         if not query_tokens:
             return {}
 
-        total_chunks = max(self.header.chunk_count, 1)
-        query_token_counts = Counter(query_tokens)
-        raw_scores: Dict[int, float] = {}
+        total_chunks = self.header.chunk_count if self.header else len(self.chunk_metadata)
+        if total_chunks <= 0:
+            return {}
 
-        for token_id, count in query_token_counts.items():
-            entries = self.lookup_chunks_for_token(token_id)
-            if not entries:
-                continue
-            doc_freq = len(entries)
-            idf = math.log((total_chunks + 1) / (doc_freq + 1)) + 1.0
-            for chunk_id, _ in entries:
-                raw_scores[chunk_id] = raw_scores.get(chunk_id, 0.0) + count * idf
+        def get_doc_freq(token_id: int) -> int:
+            return len(self.lookup_chunks_for_token(token_id))
 
-        normalized_scores: Dict[int, float] = {}
-        for chunk_id, score in raw_scores.items():
-            chunk_len = self.chunk_metadata.get(chunk_id).token_count if self.chunk_metadata.get(chunk_id) else 1
-            normalized_scores[chunk_id] = score / math.sqrt(chunk_len)
+        def get_candidate_chunks(query_tks: List[int]) -> Iterable[int]:
+            cids = set()
+            for qt in query_tks:
+                for cid, _ in self.lookup_chunks_for_token(qt):
+                    cids.add(cid)
+            return cids
 
-        return normalized_scores
+        def get_chunk_tokens(chunk_id: int) -> List[int]:
+            return self.read_chunk_tokens_by_id(chunk_id)
+
+        def get_chunk_length(chunk_id: int) -> int:
+            meta = self.chunk_metadata.get(chunk_id)
+            return meta.token_count if meta else 0
+
+        return PrismIndexer.rank_chunks(
+            query_tokens=query_tokens,
+            total_chunks=total_chunks,
+            get_doc_freq=get_doc_freq,
+            get_candidate_chunks=get_candidate_chunks,
+            get_chunk_tokens=get_chunk_tokens,
+            get_chunk_length=get_chunk_length,
+            k1=k1,
+            b=b,
+            proximity_window=25,
+            proximity_boost=2.5,
+        )
 
     def ranked_chunks(self, query_tokens: List[int], top_n: int = 5) -> List[PrismRetrievedChunk]:
         scores = self.score_chunks(query_tokens)
