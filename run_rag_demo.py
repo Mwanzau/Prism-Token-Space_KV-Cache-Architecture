@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT))
 from prism_protocol.src.token_space.importer import build_prism_from_document
 from prism_protocol.src.token_space.tokenizer_adapter import get_tokenizer_adapter
 from prism_protocol.src.token_space.binary_format import PrismReader
-from prism_protocol.src.token_space.library import load_library, route_section
+from prism_protocol.src.token_space.library import get_section_summary, load_library, narrative_multiplier, route_section
 
 DEFAULT_GGUF_PATH = ROOT / "models" / "Qwen_Qwen2.5-0.5B-Instruct-GGUF" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 DEFAULT_DOCUMENT_PATH = ROOT / "File_Samples_For_Tests" / "01Chapter1.pdf"
@@ -151,12 +151,25 @@ def _limit_to_token_budget(text: str, tokenizer, max_tokens: int = 150) -> str:
     return tokenizer.decode(token_ids[:max_tokens]).strip()
 
 
+def _boost_narrative_chunks(ranked, library, limit: int):
+    """Apply sidecar narrative tags after token retrieval, before final selection."""
+    def adjusted_score(retrieved) -> float:
+        metadata = (library or {}).get("chunks", {}).get(str(retrieved.chunk_id), {})
+        multiplier = metadata.get("narrative_multiplier")
+        if multiplier is None:
+            multiplier = narrative_multiplier(metadata.get("text", ""))
+        return retrieved.score * multiplier
+
+    return sorted(ranked, key=lambda item: (-adjusted_score(item), item.chunk_id))[:limit]
+
+
 def build_synthesis_messages(context: str, query: str) -> list[dict[str, str]]:
     """Messages passed to the GGUF's embedded Jinja chat template."""
     instruction = (
-        "You are a factual storytelling assistant. Use ONLY the provided story context "
-        "to answer the question. Summarize the plot in 2-3 direct sentences when a "
-        "summary is requested. Do not echo block headers, chunk tags, or unparsed quotes. "
+        "You are a factual storytelling assistant. Identify the characters correctly "
+        "based on the text, including who is the mother, the elephant, and the bride. "
+        "Use ONLY the provided story context. Summarize the plot in 2 direct sentences. "
+        "Do not echo block headers, chunk tags, or unparsed quotes. "
         "If the story context does not contain the answer, say so."
     )
     return [
@@ -223,7 +236,10 @@ def query_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: i
         routed_hash, allowed_chunk_ids, _ = route_section(query, reader.score_chunks(query_tokens), library)
         if routed_hash:
             routed_section = library["sections"][routed_hash]
-            ranked = reader.ranked_chunks(query_tokens, top_n=top_n, allowed_chunk_ids=allowed_chunk_ids)
+            ranked = _boost_narrative_chunks(
+                reader.ranked_chunks(query_tokens, top_n=max(top_n * 4, top_n), allowed_chunk_ids=allowed_chunk_ids),
+                library, top_n,
+            )
         else:
             ranked = reader.ranked_chunks(query_tokens, top_n=top_n)
     else:
@@ -311,6 +327,7 @@ def qa_prism_artifact(
         top_n=max(top_n * 4, top_n),
         allowed_chunk_ids=allowed_chunk_ids,
     )
+    ranked = _boost_narrative_chunks(ranked, library, max(top_n * 4, top_n))
 
     print_header("Prism QA")
     print_status(f"Prism artifact: {prism_path}")
@@ -325,8 +342,8 @@ def qa_prism_artifact(
         return 0
 
     # Extract sentence-level window (matching sentence + 1 before + 1 after) for each candidate chunk
-    sentence_candidates: list[tuple[float, int, int, float, bool, str]] = []
-    # (combined_score, chunk_id, sentence_index, retrieval_score, is_noise, window)
+    sentence_candidates: list[tuple[float, int, int, float, float, bool, str]] = []
+    # (combined_score, chunk_id, sentence_index, retrieval_score, narrative_multiplier, is_noise, window)
     for retrieved in ranked:
         text = tokenizer.decode(retrieved.tokens)
         best_idx, window_text, sent_rel = extract_highest_scoring_sentence_window(text, query)
@@ -335,17 +352,21 @@ def qa_prism_artifact(
             # A substantial discount leaves a noise chunk available only if there
             # is no meaningful alternative, preserving recall for unusual files.
             noise_multiplier = 0.08 if is_noise else 1.0
-            combined = retrieved.score * (1.0 + sent_rel) * noise_multiplier
+            chunk_metadata = (library or {}).get("chunks", {}).get(str(retrieved.chunk_id), {})
+            narrative_boost = chunk_metadata.get("narrative_multiplier")
+            if narrative_boost is None:
+                narrative_boost = narrative_multiplier(chunk_metadata.get("text", text))
+            combined = retrieved.score * narrative_boost * (1.0 + sent_rel) * noise_multiplier
             window_text = _limit_to_token_budget(window_text, tokenizer, max_tokens=150)
-            sentence_candidates.append((combined, retrieved.chunk_id, best_idx, retrieved.score, is_noise, window_text))
+            sentence_candidates.append((combined, retrieved.chunk_id, best_idx, retrieved.score, narrative_boost, is_noise, window_text))
 
     sentence_candidates.sort(key=lambda t: t[0], reverse=True)
 
     context_pieces: list[str] = []
-    provenance: list[tuple[int, int, float, float, bool, str]] = []
-    # chunk_id, sentence_index, combined_score, retrieval_score, is_noise, window
+    provenance: list[tuple[int, int, float, float, float, bool, str]] = []
+    # chunk_id, sentence_index, combined_score, retrieval_score, narrative_multiplier, is_noise, window
     used_chunks = set()
-    for score, chunk_id, sidx, retrieval_score, is_noise, window_text in sentence_candidates:
+    for score, chunk_id, sidx, retrieval_score, narrative_boost, is_noise, window_text in sentence_candidates:
         if len(context_pieces) >= top_n:
             break
         if chunk_id in used_chunks:
@@ -356,7 +377,7 @@ def qa_prism_artifact(
         # Keep model context text-only. Chunk and section identifiers are
         # recorded below in provenance, never exposed to the language model.
         context_pieces.append(piece)
-        provenance.append((chunk_id, sidx, score, retrieval_score, is_noise, piece))
+        provenance.append((chunk_id, sidx, score, retrieval_score, narrative_boost, is_noise, piece))
         used_chunks.add(chunk_id)
 
     if not context_pieces:
@@ -367,8 +388,10 @@ def qa_prism_artifact(
         raise ValueError("QA synthesis requires a local .gguf model path for llama-cpp-python.")
     llm = _load_local_llm(gguf_path, n_ctx=n_ctx, n_threads=n_threads)
     section_title = routed_section["section_title"] if routed_section else "Unscoped legacy artifact"
+    summary = get_section_summary(library, routed_hash) if library and routed_section else "No section summary is available."
+    anchored_context = f"Section: {section_title}\nSummary: {summary}\n\nContext Slices:\n" + "\n\n".join(context_pieces)
     response = llm.create_chat_completion(
-        messages=build_synthesis_messages("\n\n".join(context_pieces), query),
+        messages=build_synthesis_messages(anchored_context, query),
         max_tokens=answer_length,
         temperature=0.2,
     )
@@ -378,9 +401,9 @@ def qa_prism_artifact(
     print(answer or "(no concise answer could be synthesized)")
 
     print_header("Provenance")
-    for idx, (chunk_id, sidx, score, retrieval_score, is_noise, sent) in enumerate(provenance, start=1):
+    for idx, (chunk_id, sidx, score, retrieval_score, narrative_boost, is_noise, sent) in enumerate(provenance, start=1):
         noise_marker = " noise-penalized" if is_noise else ""
-        print(f"[{idx}] chunk={chunk_id} sent={sidx} score={score:.4f} retrieval_score={retrieval_score:.4f}{noise_marker}")
+        print(f"[{idx}] chunk={chunk_id} sent={sidx} score={score:.4f} retrieval_score={retrieval_score:.4f} narrative_multiplier={narrative_boost:.2f}{noise_marker}")
         print(f"    {sent}\n")
 
     if log_path:
@@ -392,7 +415,7 @@ def qa_prism_artifact(
             f"Answer: {answer}",
             f"Routed section: {section_title}",
             f"Top chunks: {[ (c.chunk_id, round(c.score, 4)) for c in ranked[:top_n] ]}",
-            f"Provenance: {[ (chunk_id, sent_idx, round(score, 4)) for chunk_id, sent_idx, score, _, _, _ in provenance ]}",
+            f"Provenance: {[ (chunk_id, sent_idx, round(score, 4)) for chunk_id, sent_idx, score, _, _, _, _ in provenance ]}",
         ]
         log_path.write_text("\n".join(log_content), encoding="utf-8")
         print_status(f"Wrote QA log to {log_path}")

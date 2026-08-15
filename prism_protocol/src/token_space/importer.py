@@ -11,6 +11,7 @@ from .library import (
     add_document_alias,
     empty_library,
     load_library,
+    narrative_multiplier,
     save_library,
 )
 from .tokenizer_adapter import get_tokenizer_adapter
@@ -117,6 +118,7 @@ def build_prism_from_document(
                 "section_hash": digest,
                 "section_title": section["section_title"],
                 "chunk_index": offset // chunk_size,
+                "narrative_multiplier": narrative_multiplier(tokenizer.decode(chunk_tokens)),
                 # Retain readable audit metadata outside the compact binary
                 # token stream; retrieval itself never reads this field.
                 "text": tokenizer.decode(chunk_tokens),
