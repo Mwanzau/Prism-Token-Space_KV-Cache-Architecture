@@ -401,10 +401,20 @@ def qa_prism_artifact(
     print(answer or "(no concise answer could be synthesized)")
 
     print_header("Provenance")
+    cited_urls: list[str] = []
     for idx, (chunk_id, sidx, score, retrieval_score, narrative_boost, is_noise, sent) in enumerate(provenance, start=1):
         noise_marker = " noise-penalized" if is_noise else ""
         print(f"[{idx}] chunk={chunk_id} sent={sidx} score={score:.4f} retrieval_score={retrieval_score:.4f} narrative_multiplier={narrative_boost:.2f}{noise_marker}")
         print(f"    {sent}\n")
+        chunk_urls = (library or {}).get("chunks", {}).get(str(chunk_id), {}).get("source_urls", [])
+        for url in chunk_urls:
+            if url not in cited_urls:
+                cited_urls.append(url)
+
+    if cited_urls:
+        print_header("Source Citations")
+        for url in cited_urls:
+            print(f"- {url}")
 
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -481,6 +491,39 @@ def main() -> int:
     qa_parser.add_argument("--model-format", choices=("auto", "qwen", "gemma"), default="auto", help="Deprecated; the GGUF's embedded chat template is used.")
     qa_parser.add_argument("--log-path", type=Path, default=DEFAULT_LOG_QA_PATH, help="Optional log file path for QA output.")
 
+    web_parser = subparsers.add_parser("ingest-web", help="Fetch, clean, deduplicate, and append web articles.")
+    web_parser.add_argument("--prism", type=Path, required=True, help="Section-aware Prism artifact to extend.")
+    web_parser.add_argument("--gguf", type=Path, default=DEFAULT_GGUF_PATH, help="GGUF/tokenizer used by the Prism artifact.")
+    web_parser.add_argument("--url", action="append", required=True, help="Article URL; repeat for multiple sources.")
+    web_parser.add_argument("--chunk-size", type=int, default=150, help="Token size of new web micro-chunks.")
+    web_parser.add_argument("--similarity-threshold", type=float, default=0.75, help="Jaccard threshold for near-duplicate paragraphs.")
+
+    web_qa_parser = subparsers.add_parser("web-qa", help="Ingest web articles, then answer a question from the updated Prism artifact.")
+    web_qa_parser.add_argument("--prism", type=Path, required=True, help="Section-aware Prism artifact to extend and query.")
+    web_qa_parser.add_argument("--gguf", type=Path, default=DEFAULT_GGUF_PATH, help="Local GGUF used for indexing and synthesis.")
+    web_qa_parser.add_argument("--url", action="append", required=True, help="Article URL; repeat for multiple sources.")
+    web_qa_parser.add_argument("--query", required=True, help="Question to answer after ingestion.")
+    web_qa_parser.add_argument("--top-n", type=int, default=3, help="Number of filtered micro-chunks for synthesis.")
+    web_qa_parser.add_argument("--answer-length", type=int, default=250, help="Maximum generated answer tokens.")
+    web_qa_parser.add_argument("--n-ctx", type=int, choices=(4096, 8192), default=4096, help="Local LLM context window.")
+    web_qa_parser.add_argument("--threads", type=int, choices=(2, 3, 4), default=2, help="CPU threads reserved for local inference.")
+    web_qa_parser.add_argument("--chunk-size", type=int, default=150, help="Token size of new web micro-chunks.")
+    web_qa_parser.add_argument("--similarity-threshold", type=float, default=0.75, help="Jaccard threshold for near-duplicate paragraphs.")
+    web_qa_parser.add_argument("--log-path", type=Path, default=DEFAULT_LOG_QA_PATH, help="Optional QA log path.")
+
+    auto_web_qa_parser = subparsers.add_parser("auto-web-qa", help="Search the web, ingest trusted readable sources, then answer from Prism.")
+    auto_web_qa_parser.add_argument("--prism", type=Path, default=DEFAULT_OUTPUT_PATH, help="Section-aware Prism artifact to extend and query.")
+    auto_web_qa_parser.add_argument("--gguf", type=Path, default=DEFAULT_GGUF_PATH, help="Local GGUF used for indexing and synthesis.")
+    auto_web_qa_parser.add_argument("--query", required=True, help="Question used for web discovery and final Prism QA.")
+    auto_web_qa_parser.add_argument("--max-sources", type=int, choices=range(1, 11), default=4, help="Maximum readable search results to ingest.")
+    auto_web_qa_parser.add_argument("--top-n", type=int, default=3, help="Number of filtered micro-chunks for synthesis.")
+    auto_web_qa_parser.add_argument("--answer-length", type=int, default=250, help="Maximum generated answer tokens.")
+    auto_web_qa_parser.add_argument("--n-ctx", type=int, choices=(4096, 8192), default=4096, help="Local LLM context window.")
+    auto_web_qa_parser.add_argument("--threads", type=int, choices=(2, 3, 4), default=2, help="CPU threads reserved for local inference.")
+    auto_web_qa_parser.add_argument("--chunk-size", type=int, default=150, help="Token size of new web micro-chunks.")
+    auto_web_qa_parser.add_argument("--similarity-threshold", type=float, default=0.75, help="Jaccard threshold for near-duplicate paragraphs.")
+    auto_web_qa_parser.add_argument("--log-path", type=Path, default=DEFAULT_LOG_QA_PATH, help="Optional QA log path.")
+
     demo_parser = subparsers.add_parser("demo", help="Run the built-in demo using the sample document and default model.")
     demo_parser.add_argument("--gguf", type=Path, default=DEFAULT_GGUF_PATH, help="Path to the GGUF model file.")
     demo_parser.add_argument("--document", type=Path, default=DEFAULT_DOCUMENT_PATH, help="Sample document to import.")
@@ -526,6 +569,57 @@ def main() -> int:
             return qa_prism_artifact(
                 args.prism, args.gguf, args.query, args.top_n, args.preview_tokens,
                 args.answer_length, args.log_path, args.n_ctx, args.threads, args.model_format,
+            )
+
+        if args.command == "ingest-web":
+            from prism_protocol.src.token_space.web_ingestion import fetch_clean_url, ingest_web_sources
+
+            sources = [fetch_clean_url(url) for url in args.url]
+            stats = ingest_web_sources(
+                sources, str(args.gguf), str(args.prism), chunk_size=args.chunk_size,
+                similarity_threshold=args.similarity_threshold,
+            )
+            print_status(
+                f"Web ingestion complete: {stats['unique_paragraphs']} unique paragraphs, "
+                f"{stats['duplicate_paragraphs']} duplicate links, {stats['sources']} sources indexed."
+            )
+            return 0
+
+        if args.command == "web-qa":
+            from prism_protocol.src.token_space.web_ingestion import fetch_clean_url, ingest_web_sources
+
+            sources = [fetch_clean_url(url) for url in args.url]
+            stats = ingest_web_sources(
+                sources, str(args.gguf), str(args.prism), chunk_size=args.chunk_size,
+                similarity_threshold=args.similarity_threshold,
+            )
+            print_status(
+                f"Web ingestion complete: {stats['unique_paragraphs']} unique paragraphs, "
+                f"{stats['duplicate_paragraphs']} duplicate links. Starting Prism QA.\n"
+            )
+            return qa_prism_artifact(
+                args.prism, args.gguf, args.query, args.top_n, 128, args.answer_length,
+                args.log_path, args.n_ctx, args.threads,
+            )
+
+        if args.command == "auto-web-qa":
+            from prism_protocol.src.token_space.web_ingestion import discover_and_fetch, ingest_web_sources
+
+            sources, failed_urls = discover_and_fetch(args.query, max_sources=args.max_sources)
+            print_status(f"Web search selected {len(sources)} readable source(s).")
+            if failed_urls:
+                print_status(f"Skipped {len(failed_urls)} blocked or unreadable search result(s).")
+            stats = ingest_web_sources(
+                sources, str(args.gguf), str(args.prism), chunk_size=args.chunk_size,
+                similarity_threshold=args.similarity_threshold,
+            )
+            print_status(
+                f"Web ingestion complete: {stats['unique_paragraphs']} unique paragraphs, "
+                f"{stats['duplicate_paragraphs']} duplicate links. Starting Prism QA.\n"
+            )
+            return qa_prism_artifact(
+                args.prism, args.gguf, args.query, args.top_n, 128, args.answer_length,
+                args.log_path, args.n_ctx, args.threads,
             )
 
         if args.command == "demo":

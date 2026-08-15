@@ -6,3 +6,5 @@ wheel
 pypdf
 # Optional for `run_rag_demo.py qa`: local CPU GGUF response synthesis.
 llama-cpp-python>=0.3.0
+trafilatura>=1.12.0
+ddgs>=9.14.0

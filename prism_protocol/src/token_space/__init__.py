@@ -2,7 +2,7 @@ from .binary_format import PrismBinaryHeader, PrismReader, PrismWriter
 from .indexer import PrismIndexer
 from .tokenizer_bridge import TokenizerBridge
 from .kv_cache_manager import KVCacheManager
-from .importer import extract_text_from_file, build_prism_from_document
+from .importer import extract_text_from_file, build_prism_from_document, build_prism_from_text
 from .library import LibraryDocumentParser, load_library
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "KVCacheManager",
     "extract_text_from_file",
     "build_prism_from_document",
+    "build_prism_from_text",
     "LibraryDocumentParser",
     "load_library",
 ]

@@ -69,6 +69,21 @@ def build_prism_from_document(
     progress_callback: Optional[callable] = None,
 ) -> str:
     text = extract_text_from_file(document_path)
+    return build_prism_from_text(
+        text, Path(document_path).name, gguf_path, output_path, chunk_size, append, progress_callback
+    )
+
+
+def build_prism_from_text(
+    text: str,
+    document_id: str,
+    gguf_path: str,
+    output_path: str,
+    chunk_size: int = 150,
+    append: bool = True,
+    progress_callback: Optional[callable] = None,
+    source_url: Optional[str] = None,
+) -> str:
     if not text.strip():
         raise ValueError("Document contains no extractable text")
 
@@ -92,7 +107,7 @@ def build_prism_from_document(
         raise ValueError("Library metadata tokenizer does not match the supplied GGUF/tokenizer.")
 
     parser = LibraryDocumentParser()
-    sections = parser.parse_document(text, Path(document_path).name)
+    sections = parser.parse_document(text, document_id)
     if not sections:
         raise ValueError("Document contains no indexable sections")
 
@@ -101,7 +116,7 @@ def build_prism_from_document(
     for ordinal, section in enumerate(sections, start=1):
         digest = section["section_hash"]
         already_indexed = digest in library["sections"]
-        add_document_alias(library, section["doc_id"], section)
+        add_document_alias(library, section["doc_id"], section, source_url=source_url)
         if already_indexed:
             continue
 
@@ -118,6 +133,8 @@ def build_prism_from_document(
                 "section_hash": digest,
                 "section_title": section["section_title"],
                 "chunk_index": offset // chunk_size,
+                "source_url": source_url,
+                "source_urls": [source_url] if source_url else [],
                 "narrative_multiplier": narrative_multiplier(tokenizer.decode(chunk_tokens)),
                 # Retain readable audit metadata outside the compact binary
                 # token stream; retrieval itself never reads this field.

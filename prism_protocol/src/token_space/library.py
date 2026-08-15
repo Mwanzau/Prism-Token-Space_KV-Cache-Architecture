@@ -151,8 +151,12 @@ def save_library(prism_path: str | Path, library: Dict[str, Any]) -> Path:
     return path
 
 
-def add_document_alias(library: Dict[str, Any], document_id: str, section: Dict[str, str]) -> None:
-    document = library["documents"].setdefault(document_id, {"section_hashes": []})
+def add_document_alias(
+    library: Dict[str, Any], document_id: str, section: Dict[str, str], source_url: Optional[str] = None
+) -> None:
+    document = library["documents"].setdefault(document_id, {"section_hashes": [], "source_urls": []})
+    if source_url and source_url not in document.setdefault("source_urls", []):
+        document["source_urls"].append(source_url)
     if section["section_hash"] not in document["section_hashes"]:
         document["section_hashes"].append(section["section_hash"])
     canonical = library["sections"].setdefault(section["section_hash"], {
