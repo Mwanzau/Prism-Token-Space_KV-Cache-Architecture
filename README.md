@@ -52,10 +52,11 @@ anthology adds its document alias but does not duplicate chunks.
 Build a new library artifact with the same GGUF used at query time:
 
 ```bash
-PYTHONPATH=. python run_rag_demo.py build \
+PYTHONPATH=. python3 run_rag_demo.py build \
   --document "File_Samples_For_Tests/The man elephant.txt" \
-  --gguf models/Qwen_Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf \
-  --output output/tales.prism --overwrite
+  --gguf "models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf" \
+  --output output/general_qa_qwen3.5.prism \
+  --overwrite
 ```
 
 Query or Prompt the library artifact:
