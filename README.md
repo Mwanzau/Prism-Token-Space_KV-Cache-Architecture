@@ -58,6 +58,30 @@ PYTHONPATH=. python run_rag_demo.py build \
   --output output/tales.prism --overwrite
 ```
 
+Query or Prompt the library artifact:
+
+```bash
+PYTHONPATH=. python3 run_rag_demo.py qa \
+  --prism output/general_qa_qwen3.5.prism \
+  --gguf "models/Qwen_Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf" \
+  --query "Can you tell me the story of the man elephant?" \
+  --model-format qwen \
+  --n-ctx 4096 \
+  --threads 2
+```
+
+Query or Prompt searches for data on the web which is automatically saved to the library artifact, but make sure the .prism file already exists:
+
+```bash
+PYTHONPATH=. python3 run_rag_demo.py auto-web-qa \
+  --prism output/general_qa_qwen3.5.prism \
+  --gguf models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf \
+  --query "What are the signs and symptoms of HIV/AIDS?" \
+  --max-sources 4 \
+  --n-ctx 4096 \
+  --threads 2
+```
+
 `query` and `qa` first route the question to one section, then retrieve only
 within that section. QA uses the GGUF model's embedded chat template through
 `llama-cpp-python`; no Qwen/Gemma/Llama control tokens are hardcoded.
