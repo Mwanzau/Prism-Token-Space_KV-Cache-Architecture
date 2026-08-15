@@ -8,7 +8,7 @@ Highlights
 -
 - Append-only `.prism` artifacts with an atomic tail-index for incremental ingestion
 - Support for GGUF token extraction, HF `transformers`, and `tokenizers` formats
-- Document importers with chunking and sentence-level QA provenance
+- Library-style document import with section-scoped micro-chunks, SHA-256 deduplication, and sentence-level QA provenance
 - Stress-test tooling to validate tokenizer throughput and memory usage
 
 Quickstart
@@ -40,6 +40,30 @@ python -m prism_protocol.src.token_space.importer \
 	--model models/Qwen_Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf \
 	--output output/test.prism --chunk-size 128 --append
 ```
+
+## Library artifacts and scoped retrieval
+
+Each build also writes `artifact.prism.library.json`. The sidecar maps the
+library hierarchy (`document → section → micro-chunk`) while the `.prism`
+file remains a compact token-only retrieval index. Sections are normalized and
+SHA-256 hashed before tokenization: appending the same story from another
+anthology adds its document alias but does not duplicate chunks.
+
+Build a new library artifact with the same GGUF used at query time:
+
+```bash
+PYTHONPATH=. python run_rag_demo.py build \
+  --document "File_Samples_For_Tests/The man elephant.txt" \
+  --gguf models/Qwen_Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --output output/tales.prism --overwrite
+```
+
+`query` and `qa` first route the question to one section, then retrieve only
+within that section. QA uses the GGUF model's embedded chat template through
+`llama-cpp-python`; no Qwen/Gemma/Llama control tokens are hardcoded.
+
+Older artifacts without a `.library.json` sidecar remain queryable as flat
+indexes, but must be rebuilt with `--overwrite` before appending knowledge.
 
 Run the demo QA CLI
 ```bash

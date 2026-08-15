@@ -301,22 +301,33 @@ class PrismReader:
     def chunk_info(self, chunk_id: int) -> Optional[PrismChunkMetadata]:
         return self.chunk_metadata.get(chunk_id)
 
-    def score_chunks(self, query_tokens: List[int], k1: float = 1.5, b: float = 0.75) -> Dict[int, float]:
+    def score_chunks(
+        self,
+        query_tokens: List[int],
+        k1: float = 1.5,
+        b: float = 0.75,
+        allowed_chunk_ids: Optional[Iterable[int]] = None,
+    ) -> Dict[int, float]:
         if not query_tokens:
             return {}
 
-        total_chunks = self.header.chunk_count if self.header else len(self.chunk_metadata)
+        allowed = set(allowed_chunk_ids) if allowed_chunk_ids is not None else None
+        total_chunks = len(allowed) if allowed is not None else (self.header.chunk_count if self.header else len(self.chunk_metadata))
         if total_chunks <= 0:
             return {}
 
         def get_doc_freq(token_id: int) -> int:
-            return len(self.lookup_chunks_for_token(token_id))
+            return sum(
+                1 for chunk_id, _ in self.lookup_chunks_for_token(token_id)
+                if allowed is None or chunk_id in allowed
+            )
 
         def get_candidate_chunks(query_tks: List[int]) -> Iterable[int]:
             cids = set()
             for qt in query_tks:
                 for cid, _ in self.lookup_chunks_for_token(qt):
-                    cids.add(cid)
+                    if allowed is None or cid in allowed:
+                        cids.add(cid)
             return cids
 
         def get_chunk_tokens(chunk_id: int) -> List[int]:
@@ -339,8 +350,13 @@ class PrismReader:
             proximity_boost=2.5,
         )
 
-    def ranked_chunks(self, query_tokens: List[int], top_n: int = 5) -> List[PrismRetrievedChunk]:
-        scores = self.score_chunks(query_tokens)
+    def ranked_chunks(
+        self,
+        query_tokens: List[int],
+        top_n: int = 5,
+        allowed_chunk_ids: Optional[Iterable[int]] = None,
+    ) -> List[PrismRetrievedChunk]:
+        scores = self.score_chunks(query_tokens, allowed_chunk_ids=allowed_chunk_ids)
         ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:top_n]
         result: List[PrismRetrievedChunk] = []
         for chunk_id, score in ranked:

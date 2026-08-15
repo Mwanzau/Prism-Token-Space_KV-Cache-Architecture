@@ -4,3 +4,5 @@ typing-extensions>=4.0.0
 pytest>=7.0.0
 wheel
 pypdf
+# Optional for `run_rag_demo.py qa`: local CPU GGUF response synthesis.
+llama-cpp-python>=0.3.0

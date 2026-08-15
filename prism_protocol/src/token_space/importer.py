@@ -5,8 +5,14 @@ import subprocess
 import tempfile
 
 from .binary_format import PrismWriter
-from .indexer import PrismIndexer
-from .tokenizer_bridge import TokenizerBridge
+from .binary_format import PrismReader
+from .library import (
+    LibraryDocumentParser,
+    add_document_alias,
+    empty_library,
+    load_library,
+    save_library,
+)
 from .tokenizer_adapter import get_tokenizer_adapter
 
 
@@ -66,16 +72,68 @@ def build_prism_from_document(
         raise ValueError("Document contains no extractable text")
 
     tokenizer = get_tokenizer_adapter(gguf_path)
-    tokens = tokenizer.encode(text, progress_callback=progress_callback)
-    if not tokens:
-        raise ValueError("No tokens were produced from document text")
+    output = Path(output_path)
+    existing_chunk_count = 0
+    if append and output.exists() and output.stat().st_size > 0:
+        existing = PrismReader(str(output))
+        existing.header.validate_vocab(tokenizer.model_vocab_hash)
+        existing_chunk_count = existing.header.chunk_count
 
-    chunks = [tokens[i : i + chunk_size] for i in range(0, len(tokens), chunk_size)]
+    library = load_library(output) if append else None
+    if append and existing_chunk_count and library is None:
+        raise ValueError(
+            "Existing Prism artifact has no library metadata sidecar. Rebuild it with --overwrite "
+            "to enable section-scoped retrieval."
+        )
+    if library is None:
+        library = empty_library(tokenizer.model_vocab_hash)
+    elif library.get("model_vocab_hash") != tokenizer.model_vocab_hash:
+        raise ValueError("Library metadata tokenizer does not match the supplied GGUF/tokenizer.")
+
+    parser = LibraryDocumentParser()
+    sections = parser.parse_document(text, Path(document_path).name)
+    if not sections:
+        raise ValueError("Document contains no indexable sections")
+
+    chunks = []
+    next_chunk_id = existing_chunk_count
+    for ordinal, section in enumerate(sections, start=1):
+        digest = section["section_hash"]
+        already_indexed = digest in library["sections"]
+        add_document_alias(library, section["doc_id"], section)
+        if already_indexed:
+            continue
+
+        tokens = tokenizer.encode(section["content"])
+        if not tokens:
+            continue
+        for offset in range(0, len(tokens), chunk_size):
+            chunk_tokens = tokens[offset : offset + chunk_size]
+            chunk_id = next_chunk_id + len(chunks)
+            chunks.append(chunk_tokens)
+            library["chunks"][str(chunk_id)] = {
+                "doc_id": section["doc_id"],
+                "section_id": section["section_id"],
+                "section_hash": digest,
+                "section_title": section["section_title"],
+                "chunk_index": offset // chunk_size,
+                # Retain readable audit metadata outside the compact binary
+                # token stream; retrieval itself never reads this field.
+                "text": tokenizer.decode(chunk_tokens),
+            }
+            library["sections"][digest]["chunk_ids"].append(chunk_id)
+        if progress_callback:
+            progress_callback(ordinal, len(sections))
+
+    if not chunks and existing_chunk_count == 0:
+        raise ValueError("No tokens were produced from document text")
     index_entries = PrismWriter.build_index(chunks)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    if append:
-        PrismWriter.append_prism(output_path, chunks, tokenizer.model_vocab_hash, index_entries)
-    else:
-        PrismWriter.write_prism(output_path, chunks, tokenizer.model_vocab_hash, index_entries)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if chunks:
+        if append:
+            PrismWriter.append_prism(output_path, chunks, tokenizer.model_vocab_hash, index_entries)
+        else:
+            PrismWriter.write_prism(output_path, chunks, tokenizer.model_vocab_hash, index_entries)
+    save_library(output, library)
     return output_path

@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 from prism_protocol.src.token_space.importer import build_prism_from_document
 from prism_protocol.src.token_space.tokenizer_adapter import get_tokenizer_adapter
 from prism_protocol.src.token_space.binary_format import PrismReader
+from prism_protocol.src.token_space.library import load_library, route_section
 
 DEFAULT_GGUF_PATH = ROOT / "models" / "Qwen_Qwen2.5-0.5B-Instruct-GGUF" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 DEFAULT_DOCUMENT_PATH = ROOT / "File_Samples_For_Tests" / "01Chapter1.pdf"
@@ -19,6 +20,16 @@ DEFAULT_LOG_QUERY_PATH = ROOT / "prism_query.log"
 DEFAULT_LOG_DEMO_PATH = ROOT / "prism_demo.log"
 DEFAULT_LOG_QA_PATH = ROOT / "prism_qa.log"
 DEFAULT_QUERY = "Malawi is a landlocked country"
+NOISE_PATTERNS = (
+    r"\btable of contents\b",
+    r"\bcontents\b",
+    r"\blist of illustrations?\b",
+    r"\bproject gutenberg\b",
+    r"\bgutenberg(?:\.org)?\b",
+    r"\blicen[cs]e\b",
+    r"\bcopyright\b",
+    r"\btranscriber'?s? notes?\b",
+)
 
 
 class Color:
@@ -126,12 +137,55 @@ def extract_highest_scoring_sentence_window(text: str, query: str) -> tuple[int,
     return best_idx, window_text, scores[best_idx]
 
 
+def _is_structural_noise(text: str) -> bool:
+    """Identify document furniture that should not occupy the SLM context."""
+    normalized = " ".join(text.lower().split())
+    return any(re.search(pattern, normalized) for pattern in NOISE_PATTERNS)
+
+
+def _limit_to_token_budget(text: str, tokenizer, max_tokens: int = 150) -> str:
+    """Keep a readable sentence window within a strict token budget."""
+    token_ids = tokenizer.encode(text)
+    if len(token_ids) <= max_tokens:
+        return text.strip()
+    return tokenizer.decode(token_ids[:max_tokens]).strip()
+
+
+def build_synthesis_messages(context: str, query: str) -> list[dict[str, str]]:
+    """Messages passed to the GGUF's embedded Jinja chat template."""
+    instruction = (
+        "You are a factual storytelling assistant. Use ONLY the provided story context "
+        "to answer the question. Summarize the plot in 2-3 direct sentences when a "
+        "summary is requested. Do not echo block headers, chunk tags, or unparsed quotes. "
+        "If the story context does not contain the answer, say so."
+    )
+    return [
+        {"role": "system", "content": instruction},
+        {
+            "role": "user",
+            # Section identity is retained in provenance, not injected into the
+            # generation context where it can be copied into the answer.
+            "content": f"Story Context:\n{context}\n\nQuestion: {query}",
+        },
+    ]
+
+
+def _load_local_llm(gguf_path: Path, n_ctx: int, n_threads: int):
+    """Import llama-cpp lazily so build/query continue to need no inference dependency."""
+    try:
+        from llama_cpp import Llama
+    except ImportError as exc:  # pragma: no cover - depends on optional install
+        raise RuntimeError(
+            "QA synthesis requires llama-cpp-python. Install it with `pip install llama-cpp-python`."
+        ) from exc
+    return Llama(model_path=str(gguf_path), n_ctx=n_ctx, n_threads=n_threads, verbose=False)
+
+
 def build_prism_artifact(document_path: Path, gguf_path: Path, output_path: Path, chunk_size: int, append: bool = True) -> Path:
     if not document_path.exists():
         raise FileNotFoundError(f"Document not found: {document_path}")
     if _is_local_model_path(gguf_path) and not gguf_path.exists():
         raise FileNotFoundError(f"GGUF model not found: {gguf_path}")
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # progress callback will print percentage to stdout
     def _progress(i: int, total: int) -> None:
@@ -163,7 +217,17 @@ def query_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: i
         return 1
 
     reader = PrismReader(str(prism_path))
-    ranked = reader.ranked_chunks(query_tokens, top_n=top_n)
+    library = load_library(prism_path)
+    routed_section = None
+    if library:
+        routed_hash, allowed_chunk_ids, _ = route_section(query, reader.score_chunks(query_tokens), library)
+        if routed_hash:
+            routed_section = library["sections"][routed_hash]
+            ranked = reader.ranked_chunks(query_tokens, top_n=top_n, allowed_chunk_ids=allowed_chunk_ids)
+        else:
+            ranked = reader.ranked_chunks(query_tokens, top_n=top_n)
+    else:
+        ranked = reader.ranked_chunks(query_tokens, top_n=top_n)
 
     print_header("Prism Query")
     print_status(f"Prism artifact: {prism_path}")
@@ -171,6 +235,8 @@ def query_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: i
     print(f"Query: {Color.bold(query)}")
     print(f"Top chunks: {top_n}, Preview tokens: {preview_tokens}")
     print(f"Tokenizer vocab: {len(tokenizer.vocab)}, Prism chunks: {reader.header.chunk_count}\n")
+    if routed_section:
+        print_status(f"Routed section: {routed_section['section_title']} ({routed_section['section_id']})\n")
 
     if not ranked:
         print_error("No matching chunks found in the Prism index.")
@@ -204,11 +270,25 @@ def query_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: i
     return 0
 
 
-def qa_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: int, preview_tokens: int, answer_length: int, log_path: Optional[Path]) -> int:
+def qa_prism_artifact(
+    prism_path: Path,
+    gguf_path: Path,
+    query: str,
+    top_n: int,
+    preview_tokens: int,
+    answer_length: int,
+    log_path: Optional[Path],
+    n_ctx: int = 4096,
+    n_threads: int = 2,
+    model_format: str = "auto",
+) -> int:
     if not prism_path.exists():
         raise FileNotFoundError(f"Prism artifact not found: {prism_path}")
     if _is_local_model_path(gguf_path) and not gguf_path.exists():
         raise FileNotFoundError(f"GGUF model not found: {gguf_path}")
+    # Retained for CLI compatibility. llama-cpp reads the GGUF's embedded chat
+    # template instead of selecting a hand-written format.
+    del model_format
 
     tokenizer = get_tokenizer_adapter(str(gguf_path))
     query_tokens = tokenizer.encode(query)
@@ -217,60 +297,90 @@ def qa_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: int,
         return 1
 
     reader = PrismReader(str(prism_path))
-    ranked = reader.ranked_chunks(query_tokens, top_n=top_n)
+    library = load_library(prism_path)
+    routed_section = None
+    allowed_chunk_ids = None
+    if library:
+        routed_hash, allowed_chunk_ids, _ = route_section(query, reader.score_chunks(query_tokens), library)
+        if routed_hash:
+            routed_section = library["sections"][routed_hash]
+    # Oversampling happens only inside the routed section, preserving the fast
+    # token index while ensuring unrelated stories cannot enter the prompt.
+    ranked = reader.ranked_chunks(
+        query_tokens,
+        top_n=max(top_n * 4, top_n),
+        allowed_chunk_ids=allowed_chunk_ids,
+    )
 
     print_header("Prism QA")
     print_status(f"Prism artifact: {prism_path}")
     print_status(f"GGUF model: {gguf_path}")
     print(f"Query: {Color.bold(query)}")
-    print(f"Using top {top_n} chunks for answer extraction.\n")
+    print(f"Using up to {top_n} filtered micro-chunks for local synthesis.\n")
+    if routed_section:
+        print_status(f"Stage 1 route: {routed_section['section_title']} ({routed_section['section_id']})\n")
 
     if not ranked:
         print_error("No matching chunks found in the Prism index.")
         return 0
 
     # Extract sentence-level window (matching sentence + 1 before + 1 after) for each candidate chunk
-    sentence_candidates: list[tuple[float, int, int, str]] = []  # (combined_score, chunk_id, sent_idx, window_text)
+    sentence_candidates: list[tuple[float, int, int, float, bool, str]] = []
+    # (combined_score, chunk_id, sentence_index, retrieval_score, is_noise, window)
     for retrieved in ranked:
         text = tokenizer.decode(retrieved.tokens)
         best_idx, window_text, sent_rel = extract_highest_scoring_sentence_window(text, query)
         if window_text:
-            combined = retrieved.score * (1.0 + sent_rel)
-            sentence_candidates.append((combined, retrieved.chunk_id, best_idx, window_text))
+            is_noise = _is_structural_noise(text)
+            # A substantial discount leaves a noise chunk available only if there
+            # is no meaningful alternative, preserving recall for unusual files.
+            noise_multiplier = 0.08 if is_noise else 1.0
+            combined = retrieved.score * (1.0 + sent_rel) * noise_multiplier
+            window_text = _limit_to_token_budget(window_text, tokenizer, max_tokens=150)
+            sentence_candidates.append((combined, retrieved.chunk_id, best_idx, retrieved.score, is_noise, window_text))
 
     sentence_candidates.sort(key=lambda t: t[0], reverse=True)
 
-    answer_pieces: list[str] = []
-    provenance: list[tuple[int, int, float, str]] = []  # chunk_id, sent_idx, score, window_text
+    context_pieces: list[str] = []
+    provenance: list[tuple[int, int, float, float, bool, str]] = []
+    # chunk_id, sentence_index, combined_score, retrieval_score, is_noise, window
     used_chunks = set()
-    cur_len = 0
-    for score, chunk_id, sidx, window_text in sentence_candidates:
-        if cur_len >= answer_length:
+    for score, chunk_id, sidx, retrieval_score, is_noise, window_text in sentence_candidates:
+        if len(context_pieces) >= top_n:
             break
         if chunk_id in used_chunks:
             continue
         piece = window_text.strip()
         if not piece:
             continue
-        piece_len = len(piece)
-        if cur_len + piece_len + 1 > answer_length:
-            piece = piece[: max(0, answer_length - cur_len - 3)].rsplit(" ", 1)[0] + "..."
-            answer_pieces.append(piece)
-            provenance.append((chunk_id, sidx, score, piece))
-            break
-        answer_pieces.append(piece)
-        provenance.append((chunk_id, sidx, score, piece))
+        # Keep model context text-only. Chunk and section identifiers are
+        # recorded below in provenance, never exposed to the language model.
+        context_pieces.append(piece)
+        provenance.append((chunk_id, sidx, score, retrieval_score, is_noise, piece))
         used_chunks.add(chunk_id)
-        cur_len += piece_len + 1
 
-    answer = " ".join(answer_pieces).strip()
+    if not context_pieces:
+        print_error("No usable sentence windows were found in the retrieved chunks.")
+        return 0
+
+    if not gguf_path.is_file() or gguf_path.suffix.lower() != ".gguf":
+        raise ValueError("QA synthesis requires a local .gguf model path for llama-cpp-python.")
+    llm = _load_local_llm(gguf_path, n_ctx=n_ctx, n_threads=n_threads)
+    section_title = routed_section["section_title"] if routed_section else "Unscoped legacy artifact"
+    response = llm.create_chat_completion(
+        messages=build_synthesis_messages("\n\n".join(context_pieces), query),
+        max_tokens=answer_length,
+        temperature=0.2,
+    )
+    answer = (response["choices"][0]["message"]["content"] or "").strip()
 
     print_header("Candidate Answer (synthesized)")
     print(answer or "(no concise answer could be synthesized)")
 
     print_header("Provenance")
-    for idx, (chunk_id, sidx, score, sent) in enumerate(provenance, start=1):
-        print(f"[{idx}] chunk={chunk_id} sent={sidx} score={score:.4f}")
+    for idx, (chunk_id, sidx, score, retrieval_score, is_noise, sent) in enumerate(provenance, start=1):
+        noise_marker = " noise-penalized" if is_noise else ""
+        print(f"[{idx}] chunk={chunk_id} sent={sidx} score={score:.4f} retrieval_score={retrieval_score:.4f}{noise_marker}")
         print(f"    {sent}\n")
 
     if log_path:
@@ -280,7 +390,9 @@ def qa_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: int,
             f"GGUF model: {gguf_path}",
             f"Query: {query}",
             f"Answer: {answer}",
-            f"Top chunks: {[ (c.chunk_id, round(c.score, 4)) for c in ranked ]}",
+            f"Routed section: {section_title}",
+            f"Top chunks: {[ (c.chunk_id, round(c.score, 4)) for c in ranked[:top_n] ]}",
+            f"Provenance: {[ (chunk_id, sent_idx, round(score, 4)) for chunk_id, sent_idx, score, _, _, _ in provenance ]}",
         ]
         log_path.write_text("\n".join(log_content), encoding="utf-8")
         print_status(f"Wrote QA log to {log_path}")
@@ -310,7 +422,7 @@ def main() -> int:
     build_parser.add_argument("--document", type=Path, default=DEFAULT_DOCUMENT_PATH, help="PDF or TXT document to import.")
     build_parser.add_argument("--gguf", type=Path, default=DEFAULT_GGUF_PATH, help="GGUF model file used for tokenizer extraction.")
     build_parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="Output path for the generated .prism file.")
-    build_parser.add_argument("--chunk-size", type=int, default=128, help="Chunk size used when building the Prism index.")
+    build_parser.add_argument("--chunk-size", type=int, default=150, help="Token size of section-scoped micro-chunks.")
     append_group = build_parser.add_mutually_exclusive_group()
     append_group.add_argument(
         "--append",
@@ -334,19 +446,22 @@ def main() -> int:
     query_parser.add_argument("--preview-tokens", type=int, default=64, help="Number of tokens to decode from each returned chunk.")
     query_parser.add_argument("--log-path", type=Path, default=DEFAULT_LOG_QUERY_PATH, help="Optional log file path for query output.")
 
-    qa_parser = subparsers.add_parser("qa", help="Generate a simple answer candidate from a Prism artifact.")
+    qa_parser = subparsers.add_parser("qa", help="Synthesize a factual answer from a Prism artifact with a local GGUF model.")
     qa_parser.add_argument("--prism", type=Path, required=True, help="Existing .prism artifact to query.")
     qa_parser.add_argument("--gguf", type=Path, default=DEFAULT_GGUF_PATH, help="GGUF model file used for tokenizer extraction.")
     qa_parser.add_argument("--query", type=str, default=DEFAULT_QUERY, help="Query text to ask the Prism artifact.")
-    qa_parser.add_argument("--top-n", type=int, default=3, help="Number of top ranked chunks to use for answer extraction.")
+    qa_parser.add_argument("--top-n", type=int, default=3, help="Number of filtered micro-chunks to pass to the model.")
     qa_parser.add_argument("--preview-tokens", type=int, default=128, help="Number of tokens to decode from each returned chunk.")
-    qa_parser.add_argument("--answer-length", type=int, default=320, help="Maximum length of the generated candidate answer.")
+    qa_parser.add_argument("--answer-length", type=int, default=250, help="Maximum generated answer tokens.")
+    qa_parser.add_argument("--n-ctx", type=int, choices=(4096, 8192), default=4096, help="Local LLM context window.")
+    qa_parser.add_argument("--threads", type=int, choices=(2, 3, 4), default=2, help="CPU threads reserved for local inference.")
+    qa_parser.add_argument("--model-format", choices=("auto", "qwen", "gemma"), default="auto", help="Deprecated; the GGUF's embedded chat template is used.")
     qa_parser.add_argument("--log-path", type=Path, default=DEFAULT_LOG_QA_PATH, help="Optional log file path for QA output.")
 
     demo_parser = subparsers.add_parser("demo", help="Run the built-in demo using the sample document and default model.")
     demo_parser.add_argument("--gguf", type=Path, default=DEFAULT_GGUF_PATH, help="Path to the GGUF model file.")
     demo_parser.add_argument("--document", type=Path, default=DEFAULT_DOCUMENT_PATH, help="Sample document to import.")
-    demo_parser.add_argument("--chunk-size", type=int, default=128, help="Chunk size used when building the Prism index.")
+    demo_parser.add_argument("--chunk-size", type=int, default=150, help="Token size of section-scoped micro-chunks.")
     demo_parser.add_argument("--query", type=str, default=DEFAULT_QUERY, help="Query text used by the demo.")
     demo_parser.add_argument("--top-n", type=int, default=3, help="Number of top ranked chunks to display.")
     demo_parser.add_argument("--preview-tokens", type=int, default=64, help="Number of tokens to decode from each returned chunk.")
@@ -385,7 +500,10 @@ def main() -> int:
             return query_prism_artifact(args.prism, args.gguf, args.query, args.top_n, args.preview_tokens, args.log_path)
 
         if args.command == "qa":
-            return qa_prism_artifact(args.prism, args.gguf, args.query, args.top_n, args.preview_tokens, args.answer_length, args.log_path)
+            return qa_prism_artifact(
+                args.prism, args.gguf, args.query, args.top_n, args.preview_tokens,
+                args.answer_length, args.log_path, args.n_ctx, args.threads, args.model_format,
+            )
 
         if args.command == "demo":
             return run_demo(args.gguf, args.document, args.chunk_size, args.top_n, args.preview_tokens, args.query, args.log_path)
