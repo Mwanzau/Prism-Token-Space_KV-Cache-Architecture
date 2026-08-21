@@ -207,3 +207,64 @@ def get_section_summary(library: Dict[str, Any], section_hash: str) -> str:
         for chunk_id in section.get("chunk_ids", [])
     )
     return section_summary(section["section_title"], text)
+
+
+class PrismMetadataRegistry:
+    """Manages multi-modal sidecar metadata, SHA-256 deduplication, and format tags."""
+
+    def __init__(self, sidecar_path: str | Path = "output/master_brain.prism.meta.json"):
+        self.sidecar_path = Path(sidecar_path)
+        self.data: Dict[str, Any] = self._load()
+
+    def _load(self) -> Dict[str, Any]:
+        if self.sidecar_path.exists():
+            try:
+                with self.sidecar_path.open("r", encoding="utf-8") as handle:
+                    return json.load(handle)
+            except Exception:
+                pass
+        return {"hashes": {}, "sections": {}, "metadata": {}}
+
+    def save(self) -> Path:
+        self.sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.sidecar_path.with_suffix(self.sidecar_path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(self.data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp_path.replace(self.sidecar_path)
+        return self.sidecar_path
+
+    @staticmethod
+    def compute_sha256(text: str) -> str:
+        return hashlib.sha256(text.strip().lower().encode("utf-8")).hexdigest()
+
+    def is_duplicate(self, text: str) -> bool:
+        clean_hash = self.compute_sha256(text)
+        return clean_hash in self.data["hashes"]
+
+    @staticmethod
+    def format_multimodal_content(content: str, content_format: str, language: Optional[str] = None) -> str:
+        fmt = content_format.lower()
+        if fmt == "code":
+            lang = language or "generic"
+            return f"\n[CODE_BLOCK: {lang}]\n{content}\n[/CODE_BLOCK]\n"
+        elif fmt == "table":
+            return f"\n[STRUCTURED_TABLE]\n{content}\n[/STRUCTURED_TABLE]\n"
+        return content
+
+    def register_chunk(
+        self,
+        section_id: str,
+        content: str,
+        content_format: str = "text",
+        source_uri: str = "user_ingest",
+        extra_meta: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        clean_hash = self.compute_sha256(content)
+        self.data["hashes"][clean_hash] = {
+            "section_id": section_id,
+            "format": content_format,
+            "source_uri": source_uri,
+            "metadata": extra_meta or {},
+        }
+        self.save()
+        return clean_hash
+

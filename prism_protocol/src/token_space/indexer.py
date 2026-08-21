@@ -58,7 +58,7 @@ class PrismIndexer:
         get_chunk_length: Optional[Callable[[int], int]] = None,
         k1: float = 1.5,
         b: float = 0.75,
-        proximity_window: int = 25,
+        proximity_window: int = 50,
         proximity_boost: float = 2.5,
     ) -> Dict[int, float]:
         if not query_tokens or total_chunks <= 0:

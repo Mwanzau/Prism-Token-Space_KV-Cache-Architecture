@@ -9,7 +9,7 @@ from prism_protocol.src.token_space.tokenizer_bridge import TokenizerBridge
 
 def test_append_knowledge_preserves_prior_document():
     root = Path(__file__).resolve().parent.parent
-    gguf_path = root / "models" / "Qwen_Qwen2.5-0.5B-Instruct-GGUF" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    gguf_path = root / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
     doc_a = root / "File_Samples_For_Tests" / "The black barque.txt"
     doc_b = root / "File_Samples_For_Tests" / "The man elephant.txt"
 

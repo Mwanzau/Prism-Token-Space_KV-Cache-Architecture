@@ -10,7 +10,7 @@ from prism_protocol.src.token_space.indexer import PrismIndexer
 
 def test_prism_token_space_roundtrip():
     root = Path(__file__).resolve().parent.parent
-    gguf_path = root / "models" / "Qwen_Qwen2.5-0.5B-Instruct-GGUF" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    gguf_path = root / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
     sample_text_path = root / "File_Samples_For_Tests" / "A Tale of the Boer Invasion.txt"
 
     tokenizer = TokenizerBridge.from_gguf(str(gguf_path))
@@ -39,7 +39,7 @@ def test_prism_token_space_roundtrip():
 
 def test_prism_importer_builds_from_sample_text():
     root = Path(__file__).resolve().parent.parent
-    gguf_path = root / "models" / "Qwen_Qwen2.5-0.5B-Instruct-GGUF" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    gguf_path = root / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
     sample_path = root / "File_Samples_For_Tests" / "A Tale of the Boer Invasion.txt"
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -57,7 +57,7 @@ def test_prism_importer_builds_from_sample_text():
 
 def test_prism_importer_builds_from_sample_pdf():
     root = Path(__file__).resolve().parent.parent
-    gguf_path = root / "models" / "Qwen_Qwen2.5-0.5B-Instruct-GGUF" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    gguf_path = root / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
     pdf_path = root / "File_Samples_For_Tests" / "01Chapter1.pdf"
 
     with tempfile.TemporaryDirectory() as tmpdir:

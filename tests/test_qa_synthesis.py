@@ -20,5 +20,6 @@ def test_synthesis_messages_are_model_agnostic():
 
     assert messages[0]["role"] == "system"
     assert "The Man Elephant" not in messages[1]["content"]
-    assert "Story Context:\nThe river is brown." in messages[1]["content"]
+    assert "Context:\nThe river is brown." in messages[1]["content"]
     assert "Question: What color is it?" in messages[1]["content"]
+

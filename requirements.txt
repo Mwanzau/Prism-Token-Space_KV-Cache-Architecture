@@ -8,3 +8,5 @@ pypdf
 llama-cpp-python>=0.3.0
 trafilatura>=1.12.0
 ddgs>=9.14.0
+fastapi>=0.100.0
+uvicorn>=0.20.0

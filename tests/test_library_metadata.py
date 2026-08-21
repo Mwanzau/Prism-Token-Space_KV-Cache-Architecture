@@ -14,7 +14,7 @@ def test_parser_hashes_sections_and_detects_markdown_and_book_headings():
 
 def test_router_locks_second_stage_to_the_winning_section():
     parser = LibraryDocumentParser()
-    elephant, lion = parser.parse_document("# Man Elephant\nRiver brown.\n# Flying Lion\nSky blue.", "tales.txt")[1:]
+    elephant, lion = parser.parse_document("# Man Elephant\nRiver brown.\n# Flying Lion\nSky blue.", "tales.txt")
     library = empty_library(1)
     for chunk_id, section in enumerate((elephant, lion)):
         add_document_alias(library, "tales.txt", section)

@@ -28,8 +28,8 @@ from prism_protocol.src.token_space.tokenizer_adapter import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
-QWEN_GGUF = ROOT / "models" / "Qwen_Qwen2.5-0.5B-Instruct-GGUF" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
-GEMMA_GGUF = ROOT / "models" / "Gemma-4-E2B-Uncensored-HauhauCS-Aggressive" / "Gemma-4-E2B-Uncensored-HauhauCS-Aggressive-Q2_K_P.gguf"
+QWEN_GGUF = ROOT / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+GEMMA_GGUF = ROOT / "models" / "Gemma-4-E2B-Uncensored-HauhauCS-Aggressive-Q2_K_P.gguf"
 
 
 # ──────────────────────────────────────────────
@@ -134,12 +134,24 @@ def test_gemma_gguf_spm_detection():
 
 @pytest.mark.skipif(not GEMMA_GGUF.exists(), reason="Gemma GGUF not present")
 def test_gemma_gguf_river_tokenized_as_word():
-    """After SPM fix, Gemma GGUF should match 'river' as a content token, not single chars."""
+    """After SPM fix, Gemma GGUF should tokenise 'river' as sub-tokens, not single chars.
+
+    Gemma's vocabulary contains '▁riv' (surface: ' riv') but not '▁river'.  So
+    encoding ' river' should produce ≤ 4 tokens (e.g. ' riv' + 'e' + 'r'),
+    NOT 5 single-character OOV tokens as the old BPE-style fallback did.
+    """
     bridge = TokenizerBridge.from_gguf(str(GEMMA_GGUF))
-    encoded = bridge.encode("the river")
-    # river should appear as ≤ 3 tokens (not 5 single-char tokens)
-    river_tokens = [t for t in encoded if "river" in bridge.decode([t]).lower()]
-    assert len(river_tokens) >= 1, "Expected at least one token matching 'river'"
+    encoded = bridge.encode(" river")
+    # Fewer tokens than characters means we matched multi-char vocab tokens
+    assert len(encoded) <= 4, (
+        f"Expected ≤4 tokens for ' river', got {len(encoded)}: "
+        + str([bridge.decode([t]) for t in encoded])
+    )
+    # At least one of those tokens must be 'riv' (the SPM stem)
+    decoded_parts = [bridge.decode([t]).strip() for t in encoded]
+    assert any("riv" in p for p in decoded_parts), (
+        f"Expected a token containing 'riv', got: {decoded_parts}"
+    )
 
 
 # ──────────────────────────────────────────────

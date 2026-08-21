@@ -166,11 +166,10 @@ def _boost_narrative_chunks(ranked, library, limit: int):
 def build_synthesis_messages(context: str, query: str) -> list[dict[str, str]]:
     """Messages passed to the GGUF's embedded Jinja chat template."""
     instruction = (
-        "You are a factual storytelling assistant. Identify the characters correctly "
-        "based on the text, including who is the mother, the elephant, and the bride. "
-        "Use ONLY the provided story context. Summarize the plot in 2 direct sentences. "
-        "Do not echo block headers, chunk tags, or unparsed quotes. "
-        "If the story context does not contain the answer, say so."
+        "You are a helpful, factual assistant. Answer the question accurately, directly, "
+        "and concisely based strictly on the provided context. "
+        "Do not invent information or echo block headers, chunk tags, or raw markup. "
+        "If the context does not contain the answer, state that clearly."
     )
     return [
         {"role": "system", "content": instruction},
@@ -178,7 +177,7 @@ def build_synthesis_messages(context: str, query: str) -> list[dict[str, str]]:
             "role": "user",
             # Section identity is retained in provenance, not injected into the
             # generation context where it can be copied into the answer.
-            "content": f"Story Context:\n{context}\n\nQuestion: {query}",
+            "content": f"Context:\n{context}\n\nQuestion: {query}",
         },
     ]
 
@@ -269,8 +268,11 @@ def query_prism_artifact(prism_path: Path, gguf_path: Path, query: str, top_n: i
 
     print_header("Chunk Previews")
     for rank, retrieved in enumerate(ranked, start=1):
-        preview = decode_snippet(retrieved.tokens[:preview_tokens], tokenizer)
+        full_text = tokenizer.decode(retrieved.tokens)
+        _, window_text, score = extract_highest_scoring_sentence_window(full_text, query)
+        preview = window_text if (window_text and score > 0) else decode_snippet(retrieved.tokens[:preview_tokens], tokenizer)
         print(f"[{rank}] chunk={retrieved.chunk_id} => {preview}")
+
 
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -346,7 +346,7 @@ class PrismReader:
             get_chunk_length=get_chunk_length,
             k1=k1,
             b=b,
-            proximity_window=25,
+            proximity_window=50,
             proximity_boost=2.5,
         )
 
